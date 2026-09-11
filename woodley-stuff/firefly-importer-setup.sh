@@ -35,7 +35,7 @@ log "Starting $UNIT.service (first run pulls ~830 MB)"
 systemctl --user restart "$UNIT.service"
 # Wait for the container's web server rather than just the unit.
 for _ in $(seq 1 60); do
-  if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:8081/ 2>/dev/null; then break; fi
+  if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:6580/ 2>/dev/null; then break; fi
   sleep 2
 done
 systemctl --user --no-pager --lines=0 status "$UNIT.service" || true
@@ -55,9 +55,9 @@ podman exec "$UNIT" curl -fsS -o /dev/null -w "  $FF_URL -> HTTP %{http_code}\n"
   || echo "  FAILED: check FIREFLY_III_URL in $ENV_FILE and that nginx is up on the host"
 
 APP_URL="$(sed -n 's/^APP_URL=//p' "$ENV_FILE")"
-log "Done. Importer: ${APP_URL:-http://127.0.0.1:8081}"
+log "Done. Importer: ${APP_URL:-http://127.0.0.1:6580}"
 cat <<MSG
 Next: in Firefly (Profile → OAuth) create an OAuth Client with callback
-${APP_URL:-http://<host>:8081}/callback and "Confidential" UNCHECKED, then enter
+${APP_URL:-http://<host>:6580}/callback and "Confidential" UNCHECKED, then enter
 its Client ID in the importer. (Or pin FIREFLY_III_ACCESS_TOKEN in $ENV_FILE.)
 MSG

@@ -69,7 +69,7 @@ Diagnose with `ls -Z public/index.php` and
 
 Follows the [Docker guide](https://docs.firefly-iii.org/how-to/data-importer/installation/docker/)'s
 "Plain Docker" single-container path, run with podman instead. Current
-instance: `http://192.168.0.238:8081`. Docker was **not** installed.
+instance: `http://192.168.0.238:6580`. Docker was **not** installed.
 
 ### Why podman, not docker
 
@@ -107,7 +107,7 @@ What it does (idempotent):
 | Sanity check | `podman exec firefly-importer curl $FIREFLY_III_URL/login` must return 200 |
 
 Then in Firefly III (Profile → OAuth) create an OAuth Client with callback
-`http://192.168.0.238:8081/callback` and **"Confidential" unchecked**, open the
+`http://192.168.0.238:6580/callback` and **"Confidential" unchecked**, open the
 importer and enter the Client ID. (A Personal Access Token works too, but only
 via `FIREFLY_III_ACCESS_TOKEN` in the env file — the browser form has no field
 for it.)

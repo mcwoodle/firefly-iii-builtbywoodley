@@ -14,8 +14,8 @@ Wants=network-online.target
 Image=docker.io/fireflyiii/data-importer:latest
 ContainerName=firefly-importer
 EnvironmentFile=%h/.config/firefly-importer/importer.env
-# host:container — Firefly itself is on :6560, importer on :8081 (as upstream).
-PublishPort=8081:8080
+# host:container — Firefly itself is on :6560, importer on :6580 (upstream uses 8081).
+PublishPort=6580:8080
 # `podman auto-update` pulls a newer :latest and restarts this unit.
 AutoUpdate=registry
 # Optional directory import. Keep the host path OUTSIDE the git checkout: the
