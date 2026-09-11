@@ -1,0 +1,31 @@
+# Quadlet unit for the Firefly III Data Importer (rootless podman, user systemd).
+# Installed by woodley-stuff/firefly-importer-setup.sh to
+# ~/.config/containers/systemd/firefly-importer.container
+#   → systemctl --user {status,restart,stop} firefly-importer
+#   → journalctl --user -u firefly-importer -f
+# Upstream equivalent: https://docs.firefly-iii.org/how-to/data-importer/installation/docker/ ("Plain Docker")
+
+[Unit]
+Description=Firefly III Data Importer
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=docker.io/fireflyiii/data-importer:latest
+ContainerName=firefly-importer
+EnvironmentFile=%h/.config/firefly-importer/importer.env
+# host:container — Firefly itself is on :6560, importer on :6580 (upstream uses 8081).
+PublishPort=6580:8080
+# `podman auto-update` pulls a newer :latest and restarts this unit.
+AutoUpdate=registry
+# Optional directory import. Keep the host path OUTSIDE the git checkout: the
+# :Z relabel would otherwise flip the tree to container_file_t and 403 nginx.
+#Volume=%h/firefly-import:/import:Z
+
+[Service]
+Restart=always
+# First start pulls an ~830 MB image.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
