@@ -96,28 +96,21 @@ class ConvertToTransfer implements ActionInterface
         /** @var AccountRepositoryInterface $repository */
         $repository   = app(AccountRepositoryInterface::class);
         $repository->setUser($user);
-        $expectedType = null;
-        if (TransactionTypeEnum::WITHDRAWAL->value === $type) {
-            $expectedType = $this->getSourceType($journalId);
-
-            // Withdrawal? Replace destination with account with same type as source.
-        }
-        if (TransactionTypeEnum::DEPOSIT->value === $type) {
-            $expectedType = $this->getDestinationType($journalId);
-
-            // Deposit? Replace source with account with same type as destination.
-        }
-        $opposing     = $repository->findByName($accountName, [$expectedType]);
+        // Withdrawal? Replace destination. Deposit? Replace source. Prefer an account of the same type as the
+        // one that stays, so identically named accounts of different types resolve as before, but accept any
+        // asset or liability: transfers between them are valid (e.g. paying a credit card from a checking account).
+        $expectedType = TransactionTypeEnum::WITHDRAWAL->value === $type ? $this->getSourceType($journalId) : $this->getDestinationType($journalId);
+        $validTypes   = config('firefly.expected_source_types.source.Transfer');
+        $opposing     = $repository->findByName($accountName, [$expectedType]) ?? $repository->findByName($accountName, $validTypes);
 
         if (null === $opposing) {
             Log::error(sprintf(
-                'Journal #%d cannot be converted because no valid %s account with name "%s" exists (rule #%d).',
-                $expectedType,
+                'Journal #%d cannot be converted because no asset or liability account with name "%s" exists (rule #%d).',
                 $journalId,
                 $accountName,
                 $this->action->rule_id
             ));
-            event(new RuleActionFailedOnArray($this->action, $journal, trans('rules.no_valid_opposing', ['name' => $accountName])));
+            event(new RuleActionFailedOnArray($this->action, $journal, trans('rules.no_valid_opposing', ['account' => $accountName])));
 
             return false;
         }
