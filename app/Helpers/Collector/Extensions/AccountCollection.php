@@ -24,10 +24,14 @@ declare(strict_types=1);
 
 namespace FireflyIII\Helpers\Collector\Extensions;
 
+use Carbon\Carbon;
+use FireflyIII\Enums\TransactionTypeEnum;
 use FireflyIII\Helpers\Collector\GroupCollectorInterface;
 use FireflyIII\Models\Account;
+use FireflyIII\Models\TransactionJournal;
 use FireflyIII\Support\Facades\Steam;
 use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Query\JoinClause;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Override;
@@ -37,6 +41,12 @@ use Override;
  */
 trait AccountCollection
 {
+    /**
+     * A transfer created this many seconds ago (or less) is assumed to come from the same import run as
+     * the transaction under inspection, so two identical transfers in one import both survive.
+     */
+    private const int DUPLICATE_TRANSFER_SAME_RUN_SECONDS = 60;
+
     #[Override]
     public function accountBalanceIs(string $direction, string $operator, string $value): GroupCollectorInterface
     {
@@ -167,6 +177,24 @@ trait AccountCollection
 
             Log::debug(sprintf('GroupCollector: excludeSourceAccounts: %s', implode(', ', $accountIds)));
         }
+
+        return $this;
+    }
+
+    #[Override]
+    public function hasDuplicateTransfer(int $days): GroupCollectorInterface
+    {
+        Log::warning(sprintf('GroupCollector will be SLOW: hasDuplicateTransfer: %d', $days));
+        $this->postFilters[] = static fn (array $object): bool => self::duplicateTransferExists($object, $days);
+
+        return $this;
+    }
+
+    #[Override]
+    public function hasNoDuplicateTransfer(int $days): GroupCollectorInterface
+    {
+        Log::warning(sprintf('GroupCollector will be SLOW: hasNoDuplicateTransfer: %d', $days));
+        $this->postFilters[] = static fn (array $object): bool => !self::duplicateTransferExists($object, $days);
 
         return $this;
     }
@@ -309,5 +337,48 @@ trait AccountCollection
         }
 
         return $this;
+    }
+
+    /**
+     * True when another (older) transfer between the same accounts, for the same amount and currency,
+     * is dated within $days days of this one. Used to catch a transfer imported from both accounts.
+     */
+    private static function duplicateTransferExists(array $object, int $days): bool
+    {
+        /** @var array $transaction */
+        foreach ($object['transactions'] as $transaction) {
+            if (TransactionTypeEnum::TRANSFER->value !== $transaction['transaction_type_type']) {
+                continue;
+            }
+
+            /** @var Carbon $date */
+            $date   = $transaction['date'];
+            $exists = TransactionJournal::query()
+                ->leftJoin('transactions as source', static function (JoinClause $join): void {
+                    $join->on('source.transaction_journal_id', '=', 'transaction_journals.id')->where('source.amount', '<', 0);
+                })
+                ->leftJoin('transactions as destination', static function (JoinClause $join): void {
+                    $join->on('destination.transaction_journal_id', '=', 'transaction_journals.id')->where('destination.amount', '>', 0);
+                })
+                ->where('transaction_journals.user_group_id', $transaction['user_group_id'])
+                ->where('transaction_journals.transaction_type_id', $transaction['transaction_type_id'])
+                ->where('transaction_journals.id', '!=', $transaction['transaction_journal_id'])
+                ->where('transaction_journals.created_at', '<', Carbon::now()->subSeconds(self::DUPLICATE_TRANSFER_SAME_RUN_SECONDS))
+                ->where('transaction_journals.date', '>=', $date->clone()->subDays($days)->format('Y-m-d 00:00:00'))
+                ->where('transaction_journals.date', '<=', $date->clone()->addDays($days)->format('Y-m-d 23:59:59'))
+                ->whereNull('source.deleted_at')
+                ->whereNull('destination.deleted_at')
+                ->where('source.account_id', $transaction['source_account_id'])
+                ->where('destination.account_id', $transaction['destination_account_id'])
+                ->where('source.amount', $transaction['amount'])
+                ->where('source.transaction_currency_id', $transaction['currency_id'])
+                ->exists();
+            Log::debug(sprintf('duplicateTransferExists: journal #%d, %d day(s): %s', $transaction['transaction_journal_id'], $days, var_export($exists, true)));
+            if ($exists) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -296,9 +296,20 @@ interface GroupCollectorInterface
     public function hasAttachments(): self;
 
     /**
+     * Transfer for which another transfer exists with the same source, destination, amount and currency,
+     * dated within $days days.
+     */
+    public function hasDuplicateTransfer(int $days): self;
+
+    /**
      * Has no attachments
      */
     public function hasNoAttachments(): self;
+
+    /**
+     * Opposite of hasDuplicateTransfer().
+     */
+    public function hasNoDuplicateTransfer(int $days): self;
 
     public function internalReferenceContains(string $internalReference): self;
 

@@ -2155,6 +2155,16 @@ class OperatorQuerySearch implements SearchInterface
 
                 break;
 
+            case 'has_duplicate_transfer':
+                $this->collector->hasDuplicateTransfer((int) $value);
+
+                break;
+
+            case '-has_duplicate_transfer':
+                $this->collector->hasNoDuplicateTransfer((int) $value);
+
+                break;
+
             case '-tag_is_not':
             case 'tag_is':
                 $result                  = $this->tagRepository->findByTag($value);

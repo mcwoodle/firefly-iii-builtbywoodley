@@ -401,7 +401,7 @@ class FireflyValidator extends Validator
         }
 
         // these trigger types need a numerical check:
-        $numerical   = ['amount_less', 'amount_more', 'amount_exactly'];
+        $numerical   = ['amount_less', 'amount_more', 'amount_exactly', 'has_duplicate_transfer'];
         if (in_array($triggerType, $numerical, true)) {
             return is_numeric($value);
         }

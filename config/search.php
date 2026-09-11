@@ -136,6 +136,7 @@ return [
         'has_any_bill'                    => ['alias' => false, 'needs_context' => false],
         'has_any_subscription'            => ['alias' => true, 'needs_context' => false, 'alias_for' => 'has_any_bill'],
         'has_any_tag'                     => ['alias' => false, 'needs_context' => false],
+        'has_duplicate_transfer'          => ['alias' => false, 'needs_context' => true],
         'any_notes'                       => ['alias' => false, 'needs_context' => false],
         'has_any_notes'                   => ['alias' => true, 'alias_for' => 'any_notes', 'needs_context' => false],
         'has_notes'                       => ['alias' => true, 'alias_for' => 'any_notes', 'needs_context' => false],
