@@ -37,7 +37,6 @@ use FireflyIII\Models\PiggyBank;
 use FireflyIII\Models\Transaction;
 use FireflyIII\Models\TransactionCurrency;
 use FireflyIII\Models\TransactionJournal;
-use FireflyIII\Models\TransactionJournalMeta;
 use FireflyIII\Models\UserGroup;
 use FireflyIII\Repositories\Account\AccountRepositoryInterface;
 use FireflyIII\Repositories\Bill\BillRepositoryInterface;
@@ -50,9 +49,11 @@ use FireflyIII\Services\Internal\Destroy\JournalDestroyService;
 use FireflyIII\Services\Internal\Support\JournalServiceTrait;
 use FireflyIII\Support\Facades\Amount;
 use FireflyIII\Support\Facades\AppConfiguration;
+use FireflyIII\Support\Facades\Steam;
 use FireflyIII\Support\NullArrayObject;
 use FireflyIII\User;
 use FireflyIII\Validation\AccountValidator;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use JsonException;
@@ -72,6 +73,11 @@ class TransactionJournalFactory
     private AccountValidator $accountValidator;
     private BillRepositoryInterface $billRepository;
     private CurrencyRepositoryInterface $currencyRepository;
+    /**
+     * When checking for duplicates, ignore transactions stored this recently: they come from the same import,
+     * and identical lines within one import are assumed to be genuinely distinct transactions.
+     */
+    private const int SAME_IMPORT_SECONDS = 60;
     private bool $errorOnHash = false;
     private array $fields;
     private PiggyBankEventFactory $piggyEventFactory;
@@ -232,8 +238,6 @@ class TransactionJournalFactory
         Log::debug('Now in TransactionJournalFactory::createJournal()');
         $row['import_hash_v2'] = $this->hashArray($row);
 
-        $this->errorIfDuplicate($row['import_hash_v2']);
-
         // Some basic fields
         $type                  = $this->typeRepository->findTransactionType(null, $row['type']);
         $carbon                = $row['date'] ?? today(config('app.timezone'));
@@ -316,6 +320,16 @@ class TransactionJournalFactory
         $foreignCurrency       = $this->compareCurrencies($currency, $foreignCurrency);
         $foreignCurrency       = $this->getForeignByAccount($type->type, $foreignCurrency, $destinationAccount);
         $description           = $this->getDescription($description);
+        $this->errorIfDuplicate(
+            $row['import_hash_v2'],
+            $type->type,
+            $sourceAccount,
+            $destinationAccount,
+            (string) $row['amount'],
+            $currency,
+            $description,
+            $carbon
+        );
 
         Log::debug(sprintf(
             'Currency is #%d "%s", foreign currency is #%d "%s"',
@@ -410,37 +424,89 @@ class TransactionJournalFactory
     }
 
     /**
-     * If this transaction already exists, throw an error.
+     * If this transaction already exists, throw an error. It exists when a transaction with the same import
+     * hash was stored before (the data as submitted, so a rule that later changed the description does not
+     * matter), or when the same account already has a transaction for the same amount and currency, with the
+     * same description, on the same date (so a changed import configuration does not matter either). Only the
+     * account the data was imported for counts (the source of a withdrawal or transfer, the destination of a
+     * deposit). When the stored transaction is a transfer, "same date" is widened by
+     * firefly.import_duplicate_transfer_days either way: a card payment recorded from the card statement then
+     * also catches the same payment arriving from the paying account's statement, dated by that bank.
+     * Transactions stored in the last SAME_IMPORT_SECONDS are ignored, see there, and so are deleted ones.
      *
      * @throws DuplicateTransactionException
-     * @throws JsonException
-     * @throws \Safe\Exceptions\JsonException
      */
-    private function errorIfDuplicate(string $hash): void
-    {
-        Log::debug(sprintf('In errorIfDuplicate(%s)', $hash));
+    private function errorIfDuplicate(
+        string $hash,
+        string $type,
+        Account $source,
+        Account $destination,
+        string $amount,
+        TransactionCurrency $currency,
+        string $description,
+        Carbon $date
+    ): void {
         if (false === $this->errorOnHash) {
             return;
         }
-        Log::debug('Will verify duplicate!');
+        $isDeposit    = TransactionTypeEnum::DEPOSIT->value === $type;
+        $account      = $isDeposit ? $destination : $source;
+        $amount       = $isDeposit ? Steam::positive($amount) : Steam::negative($amount);
+        $storedAgo    = Carbon::now()->subSeconds(self::SAME_IMPORT_SECONDS);
+        $transferDays = (int) config('firefly.import_duplicate_transfer_days');
+        $transferType = $this->typeRepository->findTransactionType(null, TransactionTypeEnum::TRANSFER->value);
 
-        /** @var null|TransactionJournalMeta $result */
-        $result = TransactionJournalMeta::query()
-            ->withTrashed()
-            ->leftJoin('transaction_journals', 'transaction_journals.id', '=', 'journal_meta.transaction_journal_id')
-            ->whereNotNull('transaction_journals.id')
-            ->where('transaction_journals.user_id', $this->user->id)
-            ->where('data', json_encode($hash, JSON_THROW_ON_ERROR))
-            ->with(['transactionJournal', 'transactionJournal.transactionGroup'])
-            ->first(['journal_meta.*'])
-        ;
-        if (null !== $result) {
-            Log::warning(sprintf('Found a duplicate in errorIfDuplicate because hash %s is not unique!', $hash));
-            $journal = $result->transactionJournal()->withTrashed()->first();
-            $group   = $journal?->transactionGroup()->withTrashed()->first();
-            $groupId = (int) $group?->id;
+        /** @var null|TransactionJournal $journal */
+        $journal      = TransactionJournal::query()
+            ->leftJoin('journal_meta', 'journal_meta.transaction_journal_id', '=', 'transaction_journals.id')
+            ->where('transaction_journals.user_group_id', $this->userGroup->id)
+            ->where('transaction_journals.created_at', '<', $storedAgo)
+            ->where('journal_meta.name', 'import_hash_v2')
+            ->where('journal_meta.data', json_encode($hash, JSON_THROW_ON_ERROR))
+            ->first(['transaction_journals.*']);
+        if (null !== $journal) {
+            Log::warning(sprintf('Transaction "%s" has the same import hash as journal #%d.', $description, $journal->id));
 
-            throw new DuplicateTransactionException(sprintf('Duplicate of transaction #%d.', $groupId));
+            throw new DuplicateTransactionException(sprintf('Duplicate of transaction #%d.', $journal->transaction_group_id));
+        }
+
+        /** @var null|TransactionJournal $journal */
+        $journal      = TransactionJournal::query()
+            ->leftJoin('transactions', 'transactions.transaction_journal_id', '=', 'transaction_journals.id')
+            ->where('transaction_journals.user_group_id', $this->userGroup->id)
+            ->where('transaction_journals.created_at', '<', $storedAgo)
+            ->where('transaction_journals.description', substr($description, 0, 1000))
+            ->where(static function (Builder $query) use ($date, $transferDays, $transferType): void {
+                $query->where(static function (Builder $sameDay) use ($date): void {
+                    $sameDay->where('transaction_journals.date', '>=', $date->format('Y-m-d 00:00:00'))->where(
+                        'transaction_journals.date',
+                        '<=',
+                        $date->format('Y-m-d 23:59:59')
+                    );
+                })->orWhere(static function (Builder $transfer) use ($date, $transferDays, $transferType): void {
+                    $transfer
+                        ->where('transaction_journals.transaction_type_id', $transferType->id)
+                        ->where('transaction_journals.date', '>=', $date->clone()->subDays($transferDays)->format('Y-m-d 00:00:00'))
+                        ->where('transaction_journals.date', '<=', $date->clone()->addDays($transferDays)->format('Y-m-d 23:59:59'));
+                });
+            })
+            ->whereNull('transactions.deleted_at')
+            ->where('transactions.account_id', $account->id)
+            ->where('transactions.transaction_currency_id', $currency->id)
+            ->where('transactions.amount', $amount)
+            ->first(['transaction_journals.*']);
+        if (null !== $journal) {
+            Log::warning(sprintf(
+                'Transaction "%s" (%s %s on %s, account #%d) duplicates journal #%d.',
+                $description,
+                $currency->code,
+                $amount,
+                $date->format('Y-m-d'),
+                $account->id,
+                $journal->id
+            ));
+
+            throw new DuplicateTransactionException(sprintf('Duplicate of transaction #%d.', $journal->transaction_group_id));
         }
     }
 

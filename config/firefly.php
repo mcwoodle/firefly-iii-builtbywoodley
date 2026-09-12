@@ -103,6 +103,7 @@ return [
     'enable_external_map'                  => env('ENABLE_EXTERNAL_MAP', false), // no longer used, only for default.
     'disable_frame_header'                 => env('DISABLE_FRAME_HEADER', false),
     'disable_csp_header'                   => env('DISABLE_CSP_HEADER', false),
+    'import_duplicate_transfer_days'       => (int) env_default_when_empty(env('IMPORT_DUPLICATE_TRANSFER_DAYS'), 5),
     'allow_webhooks'                       => env('ALLOW_WEBHOOKS', false), // no longer used, only for default.
 
     // info for demo site
