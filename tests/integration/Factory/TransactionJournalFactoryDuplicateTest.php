@@ -38,7 +38,8 @@ use Tests\integration\TestCase;
 /**
  * Duplicate detection for imported transactions (error_if_duplicate_hash): a transaction is a duplicate
  * when the same account already has one with the same amount, currency, description and date, or when
- * the submitted data hashes the same. Transactions stored in the last minute are not considered.
+ * the submitted data hashes the same. Against a stored transfer the date may differ by
+ * firefly.import_duplicate_transfer_days. Transactions stored in the last minute are not considered.
  */
 final class TransactionJournalFactoryDuplicateTest extends TestCase
 {
@@ -55,6 +56,49 @@ final class TransactionJournalFactoryDuplicateTest extends TestCase
         $this->travel(2)->minutes();
         // ...the account that paid it words the same payment differently.
         $this->store(['description' => 'Bill payment credit card', 'amount' => '250.00'] + $this->withdrawal());
+
+        $this->assertSame(2, $this->countJournals());
+    }
+
+    public function testDatesNearAStoredTransferCountAsTheSameTransfer(): void
+    {
+        // The card statement recorded the payment as a transfer on the 18th...
+        $this->store($this->transfer());
+        $this->travel(2)->minutes();
+        // ...the paying account's statement dates the same payment differently.
+        $this->store(['date' => '2026-08-25'] + $this->withdrawal(['description' => 'Card payment', 'amount' => '250.00']));
+        $this->store(['date' => '2026-08-11'] + $this->withdrawal(['description' => 'Card payment', 'amount' => '250.00']));
+        $this->assertSame(3, $this->countJournals());
+
+        $this->expectException(DuplicateTransactionException::class);
+        $this->store(['date' => '2026-08-16'] + $this->withdrawal(['description' => 'Card payment', 'amount' => '250.00']));
+    }
+
+    public function testDatesNearAStoredTransferCountForTheCardSideToo(): void
+    {
+        $this->store($this->transfer());
+        $this->travel(2)->minutes();
+
+        $this->expectException(DuplicateTransactionException::class);
+        $this->store(['date' => '2026-08-20', 'destination_id' => $this->otherAssetId] + $this->deposit(['description' => 'Card payment']));
+    }
+
+    public function testDateToleranceDoesNotApplyToOtherTransactions(): void
+    {
+        // The same coffee two days later is a different purchase.
+        $this->store($this->withdrawal());
+        $this->travel(2)->minutes();
+        $this->store(['date' => '2026-08-12'] + $this->withdrawal());
+
+        $this->assertSame(2, $this->countJournals());
+    }
+
+    public function testDateToleranceIsConfigurable(): void
+    {
+        config(['firefly.import_duplicate_transfer_days' => 0]);
+        $this->store($this->transfer());
+        $this->travel(2)->minutes();
+        $this->store(['date' => '2026-08-19'] + $this->withdrawal(['description' => 'Card payment', 'amount' => '250.00']));
 
         $this->assertSame(2, $this->countJournals());
     }
@@ -169,9 +213,10 @@ final class TransactionJournalFactoryDuplicateTest extends TestCase
         return TransactionJournal::query()->where('user_id', $this->user->id)->count();
     }
 
-    private function deposit(): array
+    private function deposit(array $overrides = []): array
     {
-        return [
+        return $overrides
+        + [
             'type'           => 'deposit',
             'date'           => '2026-08-18',
             'currency_code'  => 'EUR',
@@ -197,9 +242,28 @@ final class TransactionJournalFactoryDuplicateTest extends TestCase
         ]);
     }
 
-    private function withdrawal(): array
+    /**
+     * A card payment as the card statement leaves it after the rules: a transfer from the paying account
+     * (Firefly's validator only accepts transfers between accounts of the same type, so the card is an
+     * asset account here).
+     */
+    private function transfer(): array
     {
         return [
+            'type'           => 'transfer',
+            'date'           => '2026-08-18',
+            'currency_code'  => 'EUR',
+            'amount'         => '250.00',
+            'description'    => 'Card payment',
+            'source_id'      => $this->assetId,
+            'destination_id' => $this->otherAssetId
+        ];
+    }
+
+    private function withdrawal(array $overrides = []): array
+    {
+        return $overrides
+        + [
             'type'             => 'withdrawal',
             'date'             => '2026-08-10',
             'currency_code'    => 'EUR',

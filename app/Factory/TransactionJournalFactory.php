@@ -53,6 +53,7 @@ use FireflyIII\Support\Facades\Steam;
 use FireflyIII\Support\NullArrayObject;
 use FireflyIII\User;
 use FireflyIII\Validation\AccountValidator;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use JsonException;
@@ -428,8 +429,10 @@ class TransactionJournalFactory
      * matter), or when the same account already has a transaction for the same amount and currency, with the
      * same description, on the same date (so a changed import configuration does not matter either). Only the
      * account the data was imported for counts (the source of a withdrawal or transfer, the destination of a
-     * deposit), which lets both sides of a transfer come from their own account's statement. Transactions
-     * stored in the last SAME_IMPORT_SECONDS are ignored, see there, and so are deleted ones.
+     * deposit). When the stored transaction is a transfer, "same date" is widened by
+     * firefly.import_duplicate_transfer_days either way: a card payment recorded from the card statement then
+     * also catches the same payment arriving from the paying account's statement, dated by that bank.
+     * Transactions stored in the last SAME_IMPORT_SECONDS are ignored, see there, and so are deleted ones.
      *
      * @throws DuplicateTransactionException
      */
@@ -446,13 +449,15 @@ class TransactionJournalFactory
         if (false === $this->errorOnHash) {
             return;
         }
-        $isDeposit = TransactionTypeEnum::DEPOSIT->value === $type;
-        $account   = $isDeposit ? $destination : $source;
-        $amount    = $isDeposit ? Steam::positive($amount) : Steam::negative($amount);
-        $storedAgo = Carbon::now()->subSeconds(self::SAME_IMPORT_SECONDS);
+        $isDeposit    = TransactionTypeEnum::DEPOSIT->value === $type;
+        $account      = $isDeposit ? $destination : $source;
+        $amount       = $isDeposit ? Steam::positive($amount) : Steam::negative($amount);
+        $storedAgo    = Carbon::now()->subSeconds(self::SAME_IMPORT_SECONDS);
+        $transferDays = (int) config('firefly.import_duplicate_transfer_days');
+        $transferType = $this->typeRepository->findTransactionType(null, TransactionTypeEnum::TRANSFER->value);
 
         /** @var null|TransactionJournal $journal */
-        $journal   = TransactionJournal::query()
+        $journal      = TransactionJournal::query()
             ->leftJoin('journal_meta', 'journal_meta.transaction_journal_id', '=', 'transaction_journals.id')
             ->where('transaction_journals.user_group_id', $this->userGroup->id)
             ->where('transaction_journals.created_at', '<', $storedAgo)
@@ -466,13 +471,25 @@ class TransactionJournalFactory
         }
 
         /** @var null|TransactionJournal $journal */
-        $journal   = TransactionJournal::query()
+        $journal      = TransactionJournal::query()
             ->leftJoin('transactions', 'transactions.transaction_journal_id', '=', 'transaction_journals.id')
             ->where('transaction_journals.user_group_id', $this->userGroup->id)
             ->where('transaction_journals.created_at', '<', $storedAgo)
             ->where('transaction_journals.description', substr($description, 0, 1000))
-            ->where('transaction_journals.date', '>=', $date->format('Y-m-d 00:00:00'))
-            ->where('transaction_journals.date', '<=', $date->format('Y-m-d 23:59:59'))
+            ->where(static function (Builder $query) use ($date, $transferDays, $transferType): void {
+                $query->where(static function (Builder $sameDay) use ($date): void {
+                    $sameDay->where('transaction_journals.date', '>=', $date->format('Y-m-d 00:00:00'))->where(
+                        'transaction_journals.date',
+                        '<=',
+                        $date->format('Y-m-d 23:59:59')
+                    );
+                })->orWhere(static function (Builder $transfer) use ($date, $transferDays, $transferType): void {
+                    $transfer
+                        ->where('transaction_journals.transaction_type_id', $transferType->id)
+                        ->where('transaction_journals.date', '>=', $date->clone()->subDays($transferDays)->format('Y-m-d 00:00:00'))
+                        ->where('transaction_journals.date', '<=', $date->clone()->addDays($transferDays)->format('Y-m-d 23:59:59'));
+                });
+            })
             ->whereNull('transactions.deleted_at')
             ->where('transactions.account_id', $account->id)
             ->where('transactions.transaction_currency_id', $currency->id)
